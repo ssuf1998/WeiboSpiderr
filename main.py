@@ -13,4 +13,4 @@ COOKIE = 'SINAGLOBAL=9048276103233.127.1592140173413; wb_view_log_6745017589=153
 
 if __name__ == '__main__':
     spider = WeiboSpiderr(weibo_url='https://weibo.com/gugongweb', cookie=COOKIE)
-    spider.run(limit=3, save_format='csv')
+    spider.run(limit=1, save_format='csv', page_range=(1, 1))

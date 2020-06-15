@@ -7,67 +7,92 @@
 @desc: Null
 """
 
-import re
 import json
+import re
 import time
-import csv
+import urllib.parse
 
 import requests
 from bs4 import BeautifulSoup
 
-from util import is_blank
+from util import get_abs_time, clean_content, get_arg, multi_format_output
 
 
 class WeiboSpiderr(object):
-    def __init__(self, weibo_url, cookie, page_range=(1, 1)) -> None:
-        self.__WEIBO_DETAIL_URL = 'https://weibo.com/aj/v6/comment/big?ajwvr=6&id={mid}&page={page}&filter=hot&from=singleWeiBo&__rnd={timestamp}'
-        self.__WEIBO_LIST_URL = '{weibo_url}?page={page}'
+    def __init__(self, weibo_url, cookie):
+        self.__WEIBO_DETAIL_API = 'https://weibo.com/aj/v6/comment/big?ajwvr=6&id={mid}&page={page}&filter=hot&from=singleWeiBo&__rnd={timestamp}'
+        self.__WEIBOS_LIST_API = '{weibo_url}?page={page}'
         self.__UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.97 Safari/537.36'
+        self.__INTERVAL = 0.5
+        self.__RETRY_TIMES = 5
+        self.__COMMENT_NUM_THRESHOLD = 1.0
         self.__headers = {
             'user-agent': self.__UA,
             'cookie': ''
         }
 
         self.cookie = cookie
-        self.page_range = page_range
         self.weibo_url = weibo_url
 
-        self.__weibos = []
         self.__comments = {}
+        self.__weibo_detail = {}
 
-    def __get_weibos(self):
-        for i in range(self.page_range[0], self.page_range[1] + 1):
-            mids = []
-            request = requests.get(
-                url=self.__WEIBO_LIST_URL.format(weibo_url=self.weibo_url, page=i),
-                headers=self.__headers)
-            request.encoding = 'utf-8'
-            bs = BeautifulSoup(request.text, 'lxml')
+    def __get_weibo_info(self, page=1):
+        self.__weibo_detail.clear()
 
-            for script in bs.select('script'):
-                json_str = re.search(r'(?<=FM.view\()(.*)(?=\))', str(script))
-                if json_str:
-                    json_obj = json.loads(json_str.group())
-                    if 'Pl_Official_MyProfileFeed' in json_obj['domid']:
-                        bs = BeautifulSoup(json_obj['html'], 'lxml')
-                        break
+        request = requests.get(
+            url=self.__WEIBOS_LIST_API.format(weibo_url=self.weibo_url, page=page),
+            headers=self.__headers)
+        request.encoding = 'utf-8'
+        bs = BeautifulSoup(request.text, 'lxml')
 
-            weibos = bs.select('div[mid]')
+        for script in bs.select('script'):
+            weibo_json_str = re.search(r'(?<=FM.view\()(.*)(?=\))', str(script))
+            if weibo_json_str:
+                weibo_json_obj = json.loads(weibo_json_str.group())
+                if 'Pl_Official_MyProfileFeed' in weibo_json_obj['domid']:
+                    bs = BeautifulSoup(weibo_json_obj['html'], 'lxml')
+                    break
 
-            for weibo in weibos:
-                mids.append(weibo.get('mid'))
+        weibos = bs.select('div[mid].WB_cardwrap')
 
-            self.__weibos.append(mids)
-            time.sleep(0.2)
+        for weibo in weibos:
+            weibo_content = clean_content(weibo, prefix='>').replace('\u200b', '').strip()
+            weibo_send_time = weibo.select_one('a[node-type="feed_list_item_date"]').getText().strip()
+            weibo_send_time = get_abs_time(weibo_send_time)
+            weibo_detail_url = 'https://weibo.com' + weibo.select_one('a[node-type="feed_list_item_date"]').get('href')
+            weibo_transfer_num = weibo.select_one('span[node-type="forward_btn_text"]').getText().strip()[1:]
+            weibo_comment_num = weibo.select_one('span[node-type="comment_btn_text"]').getText().strip()[1:]
+            weibo_like_num = weibo.select_one('span[node-type="like_status"]').getText().strip()[1:]
+
+            weibo_media_urls = []
+            weibo_media_pics = weibo.select('div .WB_media_wrap .WB_pic img')
+            for pic in weibo_media_pics:
+                weibo_media_urls.append('https:' + pic.get('src').replace('thumb180', 'mw690'))
+
+            weibo_media_videos = weibo.select('div .WB_media_wrap .WB_video')
+            for video in weibo_media_videos:
+                get_str = urllib.parse.unquote(video.get('action-data'))
+                weibo_media_urls.append(get_arg(get_str, 'short_url'))
+
+            self.__weibo_detail[weibo.get('mid')] = {
+                'content': weibo_content,
+                'send_time': weibo_send_time,
+                'detail_url': weibo_detail_url,
+                'transfer': weibo_transfer_num,
+                'comment': weibo_comment_num,
+                'like': weibo_like_num,
+                'media_urls': weibo_media_urls
+            }
+        time.sleep(self.__INTERVAL)
 
     def __get_comment_info(self, mid):
-        self.__comments = {}
+        self.__comments.clear()
         page = 1
-        # 进循环尽可能多的获取评论
         while True:
             last_len = len(self.__comments)
             request = requests.get(
-                url=self.__WEIBO_DETAIL_URL.format(
+                url=self.__WEIBO_DETAIL_API.format(
                     mid=mid,
                     page=page,
                     timestamp=int(round(time.time() * 1000))),
@@ -75,6 +100,8 @@ class WeiboSpiderr(object):
             request.encoding = 'utf-8'
 
             bs = BeautifulSoup(request.json()['data']['html'], 'lxml')
+
+            count = request.json()['data']['count']
 
             # 逐条评论爬取
             for wrap in bs.select('div[node-type="root_comment"]'):
@@ -86,32 +113,12 @@ class WeiboSpiderr(object):
                 # 评论人微博主页链接
                 user_url = 'https:' + wrap.select_one('a[usercard]').get('href')
                 # 评论内容
-                content = wrap.select_one('div.WB_text')
-                # 评论内容中的表情清洗成字符串方便存储
-                content_imgs = wrap.select('div .WB_text > img')
-                if content_imgs:
-                    for img in content_imgs:
-                        img.replace_with(img.get('alt'))
 
-                # 评论内容中的超链接（@某人的情况）清洗成字符串
-                content_as = wrap.select('div .WB_text > a')
-                if content_as:
-                    for a in content_as:
-                        a.replace_with(a.text if a.text != '¡评论配图' else '')
+                content = clean_content(wrap)
 
-                # 正则表达式拿到干净的评论内容
-                content_temp = re.search(r'(?<={}：)(.*?)(?=<)'.format(user_name),
-                                         str(content).replace('\n', ''))
-                if content_temp:
-                    content = content_temp.group().strip()
-                    if is_blank(content):
-                        content = ''
-                else:
-                    content = ''
                 # 评论时间格式化，将“今天”转化为日期
-                comment_time = wrap.select_one('div .WB_from.S_txt2').getText().replace(
-                    '今天', time.strftime('%#m{m}%#d{d}',
-                                        time.localtime(time.time())).format(m='月', d='日'))
+                comment_time = get_abs_time(wrap.select_one('div .WB_from.S_txt2').getText())
+
                 # 处理评论中的插入图片
                 media_pics = wrap.select('div .WB_media_wrap .WB_pic img')
                 media_urls = []
@@ -124,40 +131,45 @@ class WeiboSpiderr(object):
                                                'user_url': user_url,
                                                'content': content,
                                                'time': comment_time,
-                                               'media_urls': media_urls}
+                                               'media_urls': media_urls,
+                                               'mid': mid}
 
-            # 获取评论，如果评论数已不增长，认为已尽可能获取评论，退出循环
-            if last_len == len(self.__comments):
+            # 获取评论
+            if count in range(int(len(self.__comments) * self.__COMMENT_NUM_THRESHOLD),
+                              len(self.__comments)):
                 break
             else:
-                page += 1
-                time.sleep(0.2)
+                if page > self.__RETRY_TIMES and last_len == len(self.__comments):
+                    break
+                else:
+                    page += 1
+                    time.sleep(self.__INTERVAL)
 
-    def run(self, limit=0, save_format='json'):
+    def run(self, limit=0, page_range=(1, 1), save_format='json'):
         self.__headers['cookie'] = self.cookie
-        print('正在爬取主页上的微博……')
-        self.__get_weibos()
-        for i, weibos in enumerate(self.__weibos):
-            for j, mid in enumerate(weibos[:limit] if limit != 0 else weibos):
-                fn = '第{}页第{}条微博的评论'.format(i + 1, j + 1)
+
+        for i in range(page_range[0], page_range[1] + 1):
+            fn = '第{}页上的微博详情'.format(i)
+            print('正在爬取{}……'.format(fn))
+            self.__get_weibo_info(page=i)
+
+            multi_format_output(save_format,
+                                fn,
+                                ['微博id', '微博内容', '发布时间',
+                                 '微博链接', '转发量', '评论量',
+                                 '点赞量', '媒体链接'],
+                                self.__weibo_detail)
+            print('……成功！')
+
+            mids = list(self.__weibo_detail.keys())
+            for j, mid in enumerate(mids[:limit] if limit != 0 else mids):
+                fn = '第{}页第{}条微博的评论'.format(i, j + 1)
                 print('正在爬取{}……'.format(fn))
                 self.__get_comment_info(mid)
-                if save_format == 'no':
-                    print(json.dumps(self.__comments, ensure_ascii=False))
-                elif save_format in ('json', 'txt'):
-                    with open('{}.{}'.format(fn, save_format), mode='w', encoding="utf-8") as fp:
-                        json.dump(self.__comments, fp, ensure_ascii=False)
-                        print('……成功！')
-                else:
-                    csv_file = open('{}.csv'.format(fn), mode='w', encoding="utf-8-sig", newline='')
-                    csv_writer = csv.writer(csv_file)
-
-                    csv_header = ['评论uuid', '评论人用户名', '评论人微博链接',
-                                  '评论内容', '评论时间', '带图评论的图片链接']
-                    csv_writer.writerow(csv_header)
-
-                    for key, value in self.__comments.items():
-                        row = [', '.join(v) if isinstance(v, list) else v for k, v in value.items()]
-                        row.insert(0, key)
-                        csv_writer.writerow(row)
-                    print('……成功！')
+                multi_format_output(save_format,
+                                    fn,
+                                    ['评论id', '评论人昵称', '评论人微博主页链接',
+                                     '评论内容', '发布时间', '媒体链接',
+                                     '所属微博id'],
+                                    self.__comments)
+                print('……成功！')
