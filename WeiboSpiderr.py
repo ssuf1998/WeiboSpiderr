@@ -20,7 +20,7 @@ from util import get_abs_time, clean_content, get_arg, multi_format_output
 
 class WeiboSpiderr(object):
     def __init__(self, weibo_url, cookie):
-        self.__WEIBO_DETAIL_API = 'https://weibo.com/aj/v6/comment/big?ajwvr=6&id={mid}&page={page}&filter=hot&from=singleWeiBo&__rnd={timestamp}'
+        self.__WEIBO_DETAIL_API = 'https://weibo.com/aj/v6/comment/big?ajwvr=6&id={mid}&page={page}&filter=all&from=singleWeiBo&__rnd={timestamp}'
         self.__WEIBOS_LIST_API = '{weibo_url}?page={page}'
         self.__UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.97 Safari/537.36'
         self.__INTERVAL = 0.5
@@ -104,7 +104,7 @@ class WeiboSpiderr(object):
             count = request.json()['data']['count']
 
             # 逐条评论爬取
-            for wrap in bs.select('div[node-type="root_comment"]'):
+            for wrap in bs.select('div[node-type="comment_list"]>[comment_id]'):
                 # 评论uuid，用作键值
                 comment_id = wrap.get('comment_id')
 

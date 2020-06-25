@@ -32,7 +32,7 @@ def get_abs_time(time_str):
         now_time = datetime.datetime.now()
         return (now_time - delta_minute).strftime('%#m{m}%#d{d} %H:%M').format(m='月', d='日')
     else:
-        return ''
+        return time_str
 
 
 def flat_multimedia(elements):
